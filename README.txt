@@ -46,6 +46,18 @@ will be imported in the following order:
 Each configuration file will override its possibly previously found
 configuration files of the same name higher up the chain.
 
+You can choose to ignore specific files by creating a new file in a lower folder with the prefix ".ignore".
+So for example to ignore the file:
+
+'../config/shared/block.block.exampleblock'
+
+create the file
+
+'../config/local/ignore.block.block.exampleblock'
+
+The file must not be empty for this to work. Now when running "drush config-import" any files with a matching
+.ignore prefixed file will be completely ignored.
+
 Configuration export via the "drush config-export" command will export
 the whole site configuration into the last/lowest specified
 configuration directory.

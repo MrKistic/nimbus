@@ -6,6 +6,7 @@ use Drupal\Core\Config\ConfigManagerInterface;
 use Drupal\Core\Config\StorageInterface;
 use Drupal\Core\Config\StorageComparer;
 use Drupal\nimbus\config\ProxyFileStorage;
+use Drupal\nimbus\NimbusStorageComparer;
 use Symfony\Component\Console\Helper\QuestionHelper;
 use Symfony\Component\Console\Helper\Table;
 use Symfony\Component\Console\Input\InputInterface;
@@ -80,24 +81,52 @@ class NimbusExportController {
     global $nimbus_is_export;
     $nimbus_is_export = TRUE;
 
-    $config_comparer = new StorageComparer($this->configActive, $this->configTarget, $this->configManager);
+    $config_comparer = new NimbusStorageComparer($this->configActive, $this->configTarget, $this->configManager);
 
     if (!$config_comparer->createChangelist()->hasChanges()) {
       $output->writeln('The active configuration is identical to the configuration in the export directories.');
       return TRUE;
     }
 
-    $output->writeln("Differences of the active config to the export directory:");
+    // Remove any ignore.* files as required
+    $ignore = [];
+    foreach ($config_comparer->getAllCollectionNames() as $collection) {
+      $list = $config_comparer->getChangelist(NULL, $collection);
+      foreach ($list as $key => $names) {
+        foreach ($names as $name) {
+          if (strpos($name, 'ignore.') === 0) {
+            $delete = substr($name, strlen('ignore.'));
+            $config_comparer->ignoreFile($collection, $key, $name);
+            $config_comparer->ignoreFile($collection, $key, $delete);
+            $ignore[$name] = $delete;
+          }
+        }
+      }
+    }
 
     $change_list = [];
     foreach ($config_comparer->getAllCollectionNames() as $collection) {
       $change_list[$collection] = $config_comparer->getChangelist(NULL, $collection);
     }
 
+    // Make sure we have any changes left to process
+    $empty = TRUE;
+    foreach ($change_list as $key=>$item) {
+      // changelist
+      foreach ($item as $arr) {
+        // op
+        $empty = $empty && empty($arr);
+      }
+    }
+    if ($empty) {
+      $output->writeln('The active configuration is identical to the configuration in the export directories.');
+      return TRUE;
+    }
+
+    $output->writeln("Differences of the active config to the export directory:");
+
     $this->createTable($change_list, $output);
     $helper = new QuestionHelper();
-
-    $configTarget = $this->configTarget;
 
     $question = new ConfirmationQuestion('The .yml files in your export directory (' . $this->configTarget->getWriteDirectories() . ") will be deleted and replaced with the active config. \n(y/n) ", !$input->isInteractive());
 

@@ -7,6 +7,7 @@ use Drupal\Core\Config\ConfigImporter;
 use Drupal\Core\Config\ConfigManagerInterface;
 use Drupal\Core\Config\StorageInterface;
 use Drupal\Core\Config\StorageComparer;
+use Drupal\nimbus\NimbusStorageComparer;
 use Drupal\nimbus\config\ProxyFileStorage;
 use Symfony\Component\Console\Helper\QuestionHelper;
 use Symfony\Component\Console\Helper\Table;
@@ -72,26 +73,118 @@ class NimbusImportController {
     $output->writeln('Overriden Import');
 
     $active_storage = \Drupal::service('config.storage');
+    /** @var \Drupal\nimbus\config\ProxyFileStorage $source_storage */
     $source_storage = \Drupal::service('config.storage.staging');
 
     /** @var \Drupal\Core\Config\ConfigManagerInterface $config_manager */
     $config_manager = \Drupal::service('config.manager');
-    $storage_comparer = new StorageComparer($source_storage, $active_storage, $config_manager);
+    $storage_comparer = new NimbusStorageComparer($source_storage, $active_storage, $config_manager);
 
     if (!$storage_comparer->createChangelist()->hasChanges()) {
       $output->writeln('There are no changes to import.');
       return TRUE;
     }
 
+    // Remove any ignore.* files as required
+    $ignore = [];
+    foreach ($storage_comparer->getAllCollectionNames() as $collection) {
+      $list = $storage_comparer->getChangelist(NULL, $collection);
+      foreach ($list as $key => $names) {
+        foreach ($names as $name) {
+          if (strpos($name, 'ignore.') === 0) {
+            $delete = substr($name, strlen('ignore.'));
+            $storage_comparer->ignoreFile($collection, $key, $name);
+            $storage_comparer->ignoreFile($collection, $key, $delete);
+            $ignore[$name] = $delete;
+          }
+        }
+      }
+    }
+
+    // Create the change list
     $change_list = [];
     foreach ($storage_comparer->getAllCollectionNames() as $collection) {
-      $change_list[$collection] = $storage_comparer->getChangelist(NULL, $collection);
+      $list = $storage_comparer->getChangelist(NULL, $collection);
+      $change_list[$collection] = $list;
     }
+
+    // Make sure we have any changes left to process
+    $empty = TRUE;
+    foreach ($change_list as $key=>$item) {
+      // changelist
+      foreach ($item as $arr) {
+        // op
+        $empty = $empty && empty($arr);
+      }
+    }
+    if ($empty) {
+      $output->writeln('There are no changes to import.');
+      return TRUE;
+    }
+
+    // Ask the question to process
     $this->createTable($change_list, $output);
     $helper = new QuestionHelper();
     $question = new ConfirmationQuestion("Import the listed configuration changes? \n(y/n) ", !$input->isInteractive());
 
     if ($helper->ask($input, $output, $question)) {
+
+      // Now because the bloody import process ignores the storage_comparitor and
+      // validates *all* filenames again, we have to physically move the ignored
+      // files :(
+      $i = 0;
+      $moved = [];
+      $tmpDir = file_directory_temp();
+      $movedDir = "$tmpDir/nimbus";
+      if (!is_dir($movedDir)) {
+        mkdir($movedDir);
+      }
+      foreach ($ignore as $name => $delete) {
+
+        // get the file path
+        $file_path = $source_storage->getFilePath($name);
+        $dirs = explode("\n", $file_path);
+        foreach ($dirs as $dir) {
+
+          // store the path, name and temp file
+          $i++;
+          $movedFrom = "$dir/$name.yml";
+          $movedFile = "$movedDir/$i-$name.yml";
+          $moved[] = [
+            'from' => $movedFrom,
+            'moved' => $movedFile
+          ];
+
+          // move to temp file
+          // print "Moving file: $movedFrom \n";
+          // print "Moving to: $movedFile \n";
+          @rename($movedFrom, $movedFile);
+
+        }
+
+        // get the file path
+        $file_path = $source_storage->getFilePath($delete);
+        $dirs = explode("\n", $file_path);
+        foreach ($dirs as $dir) {
+
+          // store the path, name and temp file
+          $i++;
+          $movedFrom = "$dir/$delete.yml";
+          $movedFile = "$movedDir/$i-$delete.yml";
+          $moved[] = [
+            'from' => $movedFrom,
+            'moved' => $movedFile
+          ];
+
+          // move to temp file
+          // print "Moving file: $movedFrom \n";
+          // print "Moving to: $movedFile \n";
+          @rename($movedFrom, $movedFile);
+
+        }
+
+      }
+
       $config_importer = new ConfigImporter(
         $storage_comparer,
         \Drupal::service('event_dispatcher'),
@@ -106,17 +199,26 @@ class NimbusImportController {
 
       if ($config_importer->alreadyImporting()) {
         $output->writeln('Another request may be synchronizing configuration already.');
+        foreach ($moved as $item) {
+          rename($item['moved'], $item['from']);
+        }
         return FALSE;
       }
       try {
         $config_importer->import();
         $output->writeln('The configuration was imported successfully.');
+        foreach ($moved as $item) {
+          rename($item['moved'], $item['from']);
+        }
       }
       catch (ConfigException $e) {
         $message = 'The import failed due for the following reasons:' . "\n";
         $message .= implode("\n", $config_importer->getErrors());
         watchdog_exception('config_import', $e);
         $output->writeln($message);
+        foreach ($moved as $item) {
+          rename($item['moved'], $item['from']);
+        }
         return FALSE;
       }
     }
